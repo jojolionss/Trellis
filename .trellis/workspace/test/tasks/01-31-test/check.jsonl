@@ -1,0 +1,2 @@
+{"file": "src/**/*.ts", "reason": "Lint"}
+{"file": "src/**/*.ts", "reason": "TypeCheck"}

@@ -1,0 +1,12 @@
+{
+  "timestamp": "2026-01-31T15:25:19.950719",
+  "subagent_type": "check",
+  "markers": [
+    "LINT_FINISH",
+    "TYPECHECK_FINISH"
+  ],
+  "all_complete": true,
+  "missing": [],
+  "agent_output_preview": "All checks passed. LINT_FINISH TYPECHECK_FINISH",
+  "iteration": 1
+}

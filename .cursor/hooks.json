@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "python .cursor/hooks/session-start.py"
+      }
+    ],
+    "subagentStop": [
+      {
+        "matcher": "check",
+        "command": "python .cursor/hooks/ralph-loop.py",
+        "loop_limit": 5
+      }
+    ]
+  }
+}
