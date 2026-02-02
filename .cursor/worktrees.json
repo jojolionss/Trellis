@@ -1,0 +1,10 @@
+{
+  "setup-worktree": [
+    "echo Agent ID: $CURSOR_WORKTREE_INDEX > .agent-id",
+    "echo Worktree created at: %CD% >> .agent-id"
+  ],
+  "setup-worktree-windows": [
+    "echo Agent ID: %CURSOR_WORKTREE_INDEX% > .agent-id",
+    "echo Worktree created at: %CD% >> .agent-id"
+  ]
+}

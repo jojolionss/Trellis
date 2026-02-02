@@ -59,8 +59,7 @@ Task(
   subagent_type: "plan",
   prompt: "分析并规划以下需求：<用户需求描述>
 开发类型：<backend|frontend|fullstack>
-任务名称：<feature-name>",
-  model: "claude-4.5-opus-high-thinking"
+任务名称：<feature-name>"
 )
 ```
 
@@ -95,8 +94,7 @@ trellis-context.set_current_task(task_path="<返回的任务路径>")
 ```
 Task(
   subagent_type: "implement",
-  prompt: "实现以下功能：<需求描述>",
-  model: "claude-4.5-opus-high-thinking"
+  prompt: "实现以下功能：<需求描述>"
 )
 ```
 

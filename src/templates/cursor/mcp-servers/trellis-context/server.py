@@ -65,15 +65,42 @@ PHASE_MAPPING = {
 # =============================================================================
 
 def find_trellis_root(start_path: str = None) -> str | None:
-    """Find directory containing .trellis/ from start_path upwards"""
-    if start_path is None:
-        start_path = os.getcwd()
+    """Find directory containing .trellis/ from start_path upwards
     
-    current = Path(start_path).resolve()
+    Search order:
+    1. Explicit start_path parameter
+    2. TRELLIS_PROJECT_ROOT environment variable
+    3. CURSOR_WORKSPACE_ROOT environment variable (Cursor's workspace)
+    4. Current working directory (fallback)
+    """
+    # Priority 1: Explicit parameter
+    if start_path:
+        path = Path(start_path).resolve()
+        if (path / DIR_WORKFLOW).exists():
+            return str(path)
+    
+    # Priority 2: Environment variable (set by hooks or user)
+    env_root = os.environ.get("TRELLIS_PROJECT_ROOT")
+    if env_root:
+        path = Path(env_root).resolve()
+        if (path / DIR_WORKFLOW).exists():
+            return str(path)
+    
+    # Priority 3: Cursor workspace (may be set by Cursor)
+    cursor_workspace = os.environ.get("CURSOR_WORKSPACE_ROOT")
+    if cursor_workspace:
+        path = Path(cursor_workspace).resolve()
+        if (path / DIR_WORKFLOW).exists():
+            return str(path)
+    
+    # Priority 4: Search upward from CWD
+    search_start = start_path or os.getcwd()
+    current = Path(search_start).resolve()
     while current != current.parent:
         if (current / DIR_WORKFLOW).exists():
             return str(current)
         current = current.parent
+    
     return None
 
 
@@ -723,7 +750,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     if not project_root:
         return [TextContent(
             type="text",
-            text="Error: Could not find .trellis directory. Make sure you're in a Trellis-initialized project."
+            text=f"Error: Could not find .trellis directory.\n\n"
+                 f"Searched: CWD={os.getcwd()}\n\n"
+                 f"Solutions:\n"
+                 f"1. Pass project_root parameter: get_agent_context(agent_type=\"...\", project_root=\"/path/to/project\")\n"
+                 f"2. Set env: TRELLIS_PROJECT_ROOT=/path/to/project\n"
+                 f"3. Run from a Trellis-initialized project directory"
         )]
     
     if name == "get_agent_context":

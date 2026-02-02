@@ -95,6 +95,23 @@ async function installGlobalCommands(globalCursorDir: string, templatePath: stri
 }
 
 /**
+ * Install rules to ~/.cursor/rules/ (global - as template storage)
+ * NOTE: Cursor does NOT auto-load global rules. Users need to manually add rules
+ * in Cursor Settings > Rules. This just provides a convenient location to copy from.
+ */
+async function installGlobalRules(globalCursorDir: string, templatePath: string): Promise<void> {
+  const rulesTemplatePath = path.join(templatePath, "rules");
+  const rulesDestPath = path.join(globalCursorDir, "rules");
+
+  if (!existsSync(rulesTemplatePath)) {
+    return;
+  }
+
+  // Skip existing to avoid overwriting user customizations
+  await copyDirFiltered(rulesTemplatePath, rulesDestPath, true);
+}
+
+/**
  * Create project-level hooks.json to enable hooks for this project
  * Uses absolute paths to global hooks
  */
@@ -167,16 +184,13 @@ function registerGlobalMcp(globalCursorDir: string): void {
   if (existsSync(mcpJsonPath)) {
     try {
       mcpConfig = JSON.parse(readFileSync(mcpJsonPath, "utf-8"));
-      if (!mcpConfig.mcpServers) {
-        mcpConfig.mcpServers = {};
-      }
     } catch {
       mcpConfig = { mcpServers: {} };
     }
   }
 
   // Add trellis-context if not present
-  const servers = mcpConfig.mcpServers!;
+  const servers = (mcpConfig.mcpServers ??= {});
   if (!servers["trellis-context"]) {
     const serverPath = path.join(globalCursorDir, "mcp-servers", "trellis-context", "server.py");
     servers["trellis-context"] = {
@@ -192,9 +206,10 @@ function registerGlobalMcp(globalCursorDir: string): void {
  * Configure Cursor - Global installation with project-level activation
  *
  * Global components (installed to ~/.cursor/, first time only):
- * - agents/ - Subagent definitions (implement, check, debug, research, plan)
+ * - agents/ - Subagent definitions (17 files: 5×check, 5×debug, 5×research, implement, plan)
  * - hooks/ - Hook scripts (session-start.py, ralph-loop.py)
  * - commands/ - Slash commands (trellis-start, trellis-finish-work, etc.)
+ * - rules/ - Global rules (workflow-dispatch.md for multi-agent orchestration)
  * - mcp-servers/trellis-context/ - MCP server for context injection
  * - mcp.json - MCP server registration
  *
@@ -202,7 +217,7 @@ function registerGlobalMcp(globalCursorDir: string): void {
  * - hooks.json - Hook configuration (enables hooks for this project)
  *
  * Why global installation:
- * - Agents/commands/hooks are the same for all projects
+ * - Agents/commands/hooks/rules are the same for all projects
  * - Avoids duplication across projects
  * - Still works on project-specific .trellis/ data
  * - hooks.json is project-level to enable/disable per project
@@ -228,14 +243,17 @@ export async function configureCursor(cwd: string): Promise<void> {
   // 3. Install commands globally
   await installGlobalCommands(globalCursorDir, templatePath);
 
-  // 4. Install MCP server globally
+  // 4. Install rules globally (workflow-dispatch.md)
+  await installGlobalRules(globalCursorDir, templatePath);
+
+  // 5. Install MCP server globally
   await installGlobalMcpServer(globalCursorDir, templatePath);
 
-  // 5. Register MCP in global mcp.json
+  // 6. Register MCP in global mcp.json
   registerGlobalMcp(globalCursorDir);
 
   // === Project-level activation ===
 
-  // 6. Create project hooks.json to enable hooks for this project
+  // 7. Create project hooks.json to enable hooks for this project
   createProjectHooksJson(projectCursorDir, globalCursorDir);
 }
