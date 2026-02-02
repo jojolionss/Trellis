@@ -9,20 +9,20 @@
 ### 步骤 1: 获取上下文
 
 ```bash
-./.trellis/scripts/get-context.sh
+python .trellis/scripts/get_context.py
 ```
 
 ### 步骤 2: 一键添加会话
 
 ```bash
 # 方法 1: 简单参数
-./.trellis/scripts/add-session.sh \
+python .trellis/scripts/add_session.py \
   --title "会话标题" \
   --commit "hash1,hash2" \
   --summary "完成工作的简要摘要"
 
 # 方法 2: 通过 stdin 传递详细内容
-cat << 'EOF' | ./.trellis/scripts/add-session.sh --title "标题" --commit "hash"
+cat << 'EOF' | python .trellis/scripts/add_session.py --title "标题" --commit "hash"
 | 功能 | 描述 |
 |---------|-------------|
 | 新 API | 添加了用户认证端点 |
@@ -46,7 +46,7 @@ EOF
 如果本次会话完成了某个任务：
 
 ```bash
-./.trellis/scripts/task.sh archive <任务名称>
+python .trellis/scripts/task.py archive <任务名称>
 ```
 
 ---
@@ -55,8 +55,8 @@ EOF
 
 | 命令 | 用途 |
 |---------|---------|
-| `get-context.sh` | 获取所有上下文信息 |
-| `add-session.sh --title "..." --commit "..."` | **一键添加会话（推荐）** |
-| `task.sh create "<标题>" [--slug <名称>]` | 创建新任务目录 |
-| `task.sh archive <名称>` | 归档已完成的任务 |
-| `task.sh list` | 列出活跃任务 |
+| `python get_context.py` | 获取所有上下文信息 |
+| `python add_session.py --title "..." --commit "..."` | **一键添加会话（推荐）** |
+| `python task.py create "<标题>" [--slug <名称>]` | 创建新任务目录 |
+| `python task.py archive <名称>` | 归档已完成的任务 |
+| `python task.py list` | 列出活跃任务 |

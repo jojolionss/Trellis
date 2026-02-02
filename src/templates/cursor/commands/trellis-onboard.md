@@ -210,7 +210,7 @@ AI 在这个会话中建立的所有上下文在会话结束时会丢失。下�
 ### 示例 1：Bug 修复会话
 
 **[1/8] /trellis-start** - AI 在接触代码前需要项目上下文
-**[2/8] ./.trellis/scripts/task.sh create "修复 bug" --slug fix-bug** - 跟踪工作以便将来参考
+**[2/8] python .trellis/scripts/task.py create "修复 bug" --slug fix-bug** - 跟踪工作以便将来参考
 **[3/8] /trellis-before-frontend-dev** - 注入项目特定的前端知识
 **[4/8] 调查并修复 bug** - 实际开发工作
 **[5/8] /trellis-check-frontend** - 重新验证代码是否符合规范
@@ -221,7 +221,7 @@ AI 在这个会话中建立的所有上下文在会话结束时会丢失。下�
 ### 示例 2：规划会话（无代码）
 
 **[1/4] /trellis-start** - 即使是非编码工作也需要上下文
-**[2/4] ./.trellis/scripts/task.sh create "规划任务" --slug planning-task** - 规划是有价值的工作
+**[2/4] python .trellis/scripts/task.py create "规划任务" --slug planning-task** - 规划是有价值的工作
 **[3/4] 审查文档，创建子任务列表** - 实际规划工作
 **[4/4] /trellis-record-session（带 --summary）** - 规划决策必须记录
 
@@ -316,7 +316,7 @@ grep -l "To be filled by the team" .trellis/spec/frontend/*.md 2>/dev/null | wc 
 如果开发者想要帮助填写规范，创建一个功能来跟踪：
 
 ```bash
-./.trellis/scripts/task.sh create "填写规范" --slug fill-spec-guidelines
+python .trellis/scripts/task.py create "填写规范" --slug fill-spec-guidelines
 ```
 
 然后系统地分析代码库并填写每个规范文件：

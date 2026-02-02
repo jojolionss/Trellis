@@ -51,6 +51,8 @@ trellis-context.get_agent_context(agent_type="implement", project_root="<从 pro
 
 阅读 `implement.jsonl` 中列出的文件，理解现有代码结构。
 
+**需要网络搜索时**（如查找 API 文档），读取并遵循 `~/.cursor/skills/unified-search/SKILL.md`。
+
 ### 步骤 3：逐步实现
 
 对于每个需要修改的文件：

@@ -23,6 +23,9 @@ These guides help you **ask the right questions before coding**.
 |-------|---------|-------------|
 | [Code Reuse Thinking Guide](./code-reuse-thinking-guide.md) | Identify patterns and reduce duplication | When you notice repeated patterns |
 | [Cross-Layer Thinking Guide](./cross-layer-thinking-guide.md) | Think through data flow across layers | Features spanning multiple layers |
+| [Cursor Integration Guide](./cursor-integration.md) | How to use Trellis in Cursor | When setting up or debugging Cursor workflow |
+| [Context Management Guide](./context-management.md) | Managing LLM context and memory | When dealing with large tasks or context limits |
+| [Personal Edition Guide](./personal-edition.md) | Customizing agent identity | When configuring personal preferences |
 
 ---
 

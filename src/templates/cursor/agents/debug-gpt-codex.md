@@ -56,6 +56,8 @@ trellis-context.get_agent_context(agent_type="debug", project_root="<从 prompt 
 ls .trellis/big-question/
 ```
 
+**需要网络搜索时**（如查找错误解决方案），读取并遵循 `~/.cursor/skills/unified-search/SKILL.md`。
+
 ### 步骤 3：逐个修复
 
 对于每个问题：

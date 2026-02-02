@@ -28,7 +28,7 @@ cat .trellis/workflow.md  # 开发流程、规范和快速入门指南
 ### 步骤 2: 获取当前状态 `[AI]`
 
 ```bash
-./.trellis/scripts/get-context.sh
+python .trellis/scripts/get_context.py
 ```
 
 返回内容包括：
@@ -61,7 +61,7 @@ cat .trellis/spec/guides/cross-layer-thinking-guide.md
 ### 步骤 4: 检查活跃任务 `[AI]`
 
 ```bash
-./.trellis/scripts/task.sh list
+python .trellis/scripts/task.py list
 ```
 
 如果是继续之前的工作，请查看任务文件。
@@ -99,7 +99,7 @@ cat .trellis/spec/guides/cross-layer-thinking-guide.md
 #### 步骤 1: 创建任务 `[AI]`
 
 ```bash
-./.trellis/scripts/task.sh create "<标题>" --slug <名称>
+python .trellis/scripts/task.py create "<标题>" --slug <名称>
 ```
 
 #### 步骤 2: 实现并验证 `[AI]`
@@ -116,7 +116,7 @@ cat .trellis/spec/guides/cross-layer-thinking-guide.md
 4. 提醒用户运行 `/trellis-record-session` `[USER]`
 5. 归档任务 `[AI]`：
    ```bash
-   ./.trellis/scripts/task.sh archive <任务名称>
+   python .trellis/scripts/task.py archive <任务名称>
    ```
 
 ---
@@ -142,10 +142,10 @@ cat .trellis/spec/guides/cross-layer-thinking-guide.md
 
 | 脚本 | 用途 |
 |--------|---------|
-| `task.sh create "<标题>" [--slug <名称>]` | 创建任务目录 |
-| `task.sh list` | 列出活跃任务 |
-| `task.sh archive <名称>` | 归档任务 |
-| `get-context.sh` | 获取会话上下文 |
+| `python task.py create "<标题>" [--slug <名称>]` | 创建任务目录 |
+| `python task.py list` | 列出活跃任务 |
+| `python task.py archive <名称>` | 归档任务 |
+| `python get_context.py` | 获取会话上下文 |
 
 ---
 

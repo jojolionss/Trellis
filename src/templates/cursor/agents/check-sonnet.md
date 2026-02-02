@@ -61,6 +61,8 @@ git diff              # 查看具体更改
 - 是否缺少类型
 - 是否有潜在 bug
 
+**需要网络搜索时**（如查找最佳实践），读取并遵循 `~/.cursor/skills/unified-search/SKILL.md`。
+
 ### 步骤 3：自行修复
 
 发现问题后：

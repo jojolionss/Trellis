@@ -56,6 +56,8 @@ trellis init -u your-name --claude
 
 ### Cursor
 
+**方式一：终端命令（推荐新用户）**
+
 ```bash
 # 1. 全局安装
 npm install -g @mindfoldhq/trellis@latest
@@ -65,6 +67,20 @@ trellis init -u your-name --cursor
 
 # 3. 打开 Cursor，使用 /trellis-start 开始干活
 ```
+
+**方式二：斜杠命令（无需终端）**
+
+如果你已有 Trellis 的全局组件，可以直接在 Cursor 中使用：
+
+```
+/trellis-init
+```
+
+AI 会自动完成项目级配置：
+- 初始化 `.trellis/` 目录结构（workflow/spec/workspace/tasks）
+- 创建 `AGENTS.md`
+- 创建 `.cursor/hooks.json` 以启用全局 hooks
+- 复用已安装的全局组件（agents/commands/hooks/MCP server）
 
 > `your-name` 是你的标识，会创建个人工作区 `.trellis/workspace/your-name/`
 
@@ -165,12 +181,24 @@ trellis init -u your-name --cursor
 │   ├── session-start.py     #   启动时注入上下文
 │   └── ralph-loop.py        #   质量控制循环
 ├── mcp-servers/
-│   └── trellis-context/     # MCP 服务器（上下文注入）
+│   └── trellis-context/     # MCP 服务器（上下文注入 + 个人版功能）
+│       ├── server.py        #   主服务器（含自动安装 mcp）
+│       ├── skills_matcher.py #   Skills 触发词匹配器（match_skills 工具调用，默认不自动触发）
+│       └── requirements.txt #   Python 依赖列表
 └── mcp.json                 # MCP 注册
 ```
 
 > **设计说明**：Cursor 采用全局安装，因为 agents/commands/hooks 对所有项目相同。
 > 项目仅需 `.cursor/hooks.json` 启用钩子，操作时仍作用于当前项目的 `.trellis/` 数据。
+
+### 上下文压缩（Context Compression）
+
+Trellis 通过 JSONL 清单精确控制注入内容：每个任务可以提供 `spec.jsonl` 或各 Agent 的
+`implement.jsonl` / `check.jsonl` / `debug.jsonl` / `research.jsonl` / `finish.jsonl`，
+只加载当前任务相关的规范与文件，避免把整个仓库塞进上下文。
+
+此外 MCP 提供 `mask_tool_results` 工具对长输出做 Observation Masking（`soft_trim` /
+`summary` / `full_compress`），进一步减少 token 消耗。
 
 ### 工作流图
 
@@ -186,36 +214,72 @@ Trellis 完全支持 Cursor IDE，但由于架构差异，部分实现方式有�
 
 | 功能 | Claude Code | Cursor | 说明 |
 |------|-------------|--------|------|
+| **初始化方式** | `trellis init --claude` | `trellis init --cursor` 或 `/trellis-init` | Cursor 支持斜杠命令一键初始化 |
 | **子代理上下文** | `inject-subagent-context.py` | MCP `trellis-context` | Cursor 不支持 PreToolUse 修改子代理输入 |
 | **质量控制循环** | `decision: block` | `followup_message` | Cursor 不支持阻止子代理停止 |
-| **并行开发** | Git Worktree 物理隔离 | 子代理并行调用 | 架构不同，效果等价 |
+| **并行开发** | Git Worktree 物理隔离 | 子代理并行调用（5 模型） | 架构不同，效果等价 |
 | **调度代理** | `dispatch.md` 子代理 | 主代理 + 全局 Rules | Cursor 主代理即调度器 |
 | **配置位置** | `.claude/` 项目级 | `~/.cursor/` 全局 | agents/commands/hooks 全局安装，避免重复 |
 | **项目激活** | 自动（有 .claude/ 即生效） | `.cursor/hooks.json` | 项目级 hooks.json 启用钩子 |
+| **Skills 触发** | 手动 @ 引用 | 手动引用 / match_skills | 默认不自动触发（可手动调用 match_skills） |
+| **依赖安装** | 手动 pip install | MCP 启动时自动安装 `mcp`（可禁用） | 其他依赖需手动安装 |
 
 ### Cursor 特有功能
 
-1. **完整上下文注入**
+1. **一键初始化（`/trellis-init`）**
+   - 在 Cursor IDE 中输入 `/trellis-init`，AI 自动完成项目级配置
+   - 创建 `.trellis/` 目录结构与 `AGENTS.md`
+   - 创建 `.cursor/hooks.json`，复用全局 agents/commands/hooks/MCP server
+   - 支持 Windows / macOS / Linux 跨平台
+
+2. **完整上下文注入**
    - `session-start.py` 会话启动时注入**完整内容**（workflow.md、spec index、指令）
    - 与原版 Claude Code 行为一致，无需手动调用 `/trellis-start`
 
-2. **MCP 上下文注入**
+3. **MCP 上下文注入**
    - 子代理启动时调用 `trellis-context.get_agent_context()` 获取规范
    - 支持 `implement`、`check`、`debug`、`research`、`plan` 五种代理类型
    - `is_finish=true` 参数支持轻量级 finish 阶段上下文
 
-3. **Ralph Loop（质量控制循环）**
+4. **上下文压缩（Observation Masking）**
+   - MCP 工具 `mask_tool_results` 可压缩工具输出，减少上下文占用
+   - 支持 `soft_trim` / `summary` / `full_compress` 策略，可指定 head/tail 长度
+
+5. **个人版（SOUL / IDENTITY / Memory）**
+   - `SOUL.md` / `IDENTITY.md` 自动创建并注入到 agent context
+   - `memory_save` / `memory_search` / `memory_flush` 提供长期记忆
+   - 记忆存储在 `~/.trellis/memory/`，跨项目可复用
+
+6. **Ralph Loop（质量控制循环）**
    - 使用 `followup_message` 机制触发主代理重新调度 Check 代理
    - 效果与原版一致：检查不通过则循环，直到全部标记出现
 
-4. **斜杠命令格式**
+7. **多模型并行代理**
+   - Check/Debug/Research 阶段支持 5 个模型同时运行（Opus、Sonnet、GPT-XHigh、GPT-Codex、Gemini-Pro）
+   - 发现型任务并行执行，提高效率和覆盖率
+
+8. **斜杠命令格式**
    - Claude Code: `/trellis:start`
    - Cursor: `/trellis-start`
    - 所有命令已汉化
 
-5. **子代理汉化**
+9. **子代理汉化**
    - 所有 Agent 定义（implement、check、debug、research、plan）已翻译为中文
    - 保留 `Please respond in English.` 确保输出质量
+
+### 个人版（Personal Edition）
+
+个人版能力为用户级配置，存放在 `~/.trellis/`，不会进入项目仓库：
+
+- `SOUL.md`：定义核心价值观、决策原则和偏好（MCP 首次启动会自动生成模板）
+- `IDENTITY.md`：定义角色/专长画像，会在 `get_agent_context` 时注入
+- `memory/`：长期记忆目录（`decisions.jsonl` / `preferences.jsonl` / `patterns.jsonl` + `index.json`）
+
+可用工具：
+
+- `memory_save`：保存重要决策/偏好/模式
+- `memory_search`：检索历史记忆
+- `memory_flush`：把会话摘要写入长期记忆
 
 ### Cursor 快速上手
 
@@ -237,6 +301,9 @@ trellis init --cursor
 
 ## 路线图
 
+- [ ] **Skills 触发词系统** — 自动匹配与注入（计划中）
+- [x] **一键初始化** — `/trellis-init` 斜杠命令自动安装 ✅
+- [x] **多模型并行代理** — Check/Debug/Research 5 模型并行 ✅
 - [ ] **更好的代码审查** — 更完善的自动化审查流程
 - [ ] **Skill 包** — 预置工作流包，即插即用
 - [ ] **更广泛的工具支持** — Cursor、OpenCode、Codex 集成
@@ -308,6 +375,39 @@ Cursor 采用全局安装是因为这些组件对所有项目相同，避免重�
 <summary><strong>为什么 Cursor 没有 dispatch.md？</strong></summary>
 
 Cursor 的主代理（Agent 模式）本身就是调度器，不需要单独的 dispatch 子代理。调度规则放在项目的 `AGENTS.md` 或全局 Rules 中。这样更简洁，也避免了"子代理调用子代理"的限制问题。
+
+</details>
+
+<details>
+<summary><strong><code>/trellis-init</code> 和 <code>trellis init --cursor</code> 有什么区别？</strong></summary>
+
+功能等价，使用场景不同：
+- **`trellis init --cursor`**：在终端运行，需要先安装 npm 包
+- **`/trellis-init`**：在 Cursor IDE 中输入，AI 自动执行所有步骤
+
+如果你已有其他项目的 Trellis 配置，可以直接用 `/trellis-init`，不需要再装 npm。
+
+</details>
+
+<details>
+<summary><strong>Skills 怎么用？</strong></summary>
+
+目前 trellis-context 默认不做自动匹配，但已内置 `match_skills` 工具，
+可做关键词/正则/文件模式匹配；也可以继续手动引用 Skill。
+
+Skill 文件可以放在 `~/.cursor/skills/`（用户级）或 `.trellis/skills/`（项目级）。
+
+</details>
+
+<details>
+<summary><strong>MCP Server 的依赖是如何安装的？</strong></summary>
+
+`server.py` 会在启动时调用 `_ensure_dependencies()`，默认只尝试安装缺失的 `mcp`
+（可通过 `TRELLIS_MCP_NO_AUTO_INSTALL=1` 禁用）。
+
+依赖清单在 `~/.cursor/mcp-servers/trellis-context/requirements.txt`。
+如果要使用 `match_skills`（`skills_matcher.py`）的 YAML/regex 能力，
+可按需安装 `pyyaml` / `regex`。
 
 </details>
 

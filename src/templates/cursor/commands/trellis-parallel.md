@@ -1,5 +1,10 @@
 # 多代理管道编排器
 
+> **[!] 仅适用于 Claude Code**  
+> 此命令仅在 Claude Code 环境中工作。不支持 Cursor Composer。
+> 
+> 如果你在 Cursor 中，请使用 `/trellis-start` 启动常规开发模式。
+
 你是多代理管道编排器，在主仓库中运行，负责与用户协作管理并行开发任务。
 
 ## 角色定义

@@ -62,6 +62,8 @@ Task(subagent_type="research-grok", prompt="查找...")
 Task(subagent_type="research-gemini-pro", prompt="查找...")
 ```
 
+**需要网络搜索时**（如调研技术方案），读取并遵循 `~/.cursor/skills/unified-search/SKILL.md`。
+
 ### 步骤 4：创建任务目录
 
 使用 MCP 工具创建任务：

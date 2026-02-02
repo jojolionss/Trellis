@@ -60,7 +60,7 @@ user-ace-tool-search_context(
 
 ### 2. 外部搜索（技术方案）
 
-使用网络搜索获取最佳实践和代码示例。
+**网络搜索时**，读取并遵循 `~/.cursor/skills/unified-search/SKILL.md`。
 
 ---
 

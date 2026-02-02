@@ -7,11 +7,16 @@ Replaces Claude Code's PreToolUse hook + updatedInput mechanism.
 
 Tools:
 - get_agent_context: Get complete context for a specific agent type
+- mask_tool_results: Compress/trim large tool results to save context tokens
+- memory_save: Save important information to long-term memory (Personal Edition)
+- memory_search: Search long-term memory (Personal Edition)
+- memory_flush: Flush a session summary into long-term memory (Personal Edition)
 - get_current_task: Get current task information
 - set_current_task: Set current task path
 - update_phase: Update task.json current_phase
 - list_tasks: List all tasks
 - create_task: Create a new task
+- match_skills: Find skills that match a prompt and file context
 
 Usage in subagent prompt:
 "First, call trellis-context MCP's get_agent_context tool with your agent type,
@@ -19,14 +24,513 @@ then follow the returned context to complete your task."
 """
 
 import json
+import math
 import os
-from datetime import datetime
+import re
+import uuid
+import sys
+import subprocess
+import importlib.util
+from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+# =============================================================================
+# Auto-install Dependencies (runs once at startup)
+# =============================================================================
+
+def _ensure_dependencies() -> None:
+    """
+    Ensure required runtime deps are installed.
+
+    This is a convenience for Cursor Personal Edition so users can run the MCP
+    server without manual `pip install`. Set `TRELLIS_MCP_NO_AUTO_INSTALL=1` to
+    disable auto-install.
+    """
+    disable = os.environ.get("TRELLIS_MCP_NO_AUTO_INSTALL", "").strip().lower()
+    if disable in {"1", "true", "yes"}:
+        return
+
+    # Keep this list in sync with requirements.txt for this MCP server template.
+    required = {
+        "mcp": "mcp",
+        # Skill matching uses YAML frontmatter.
+        "yaml": "pyyaml",
+        # Regex triggers use the third-party `regex` module for timeout support.
+        "regex": "regex",
+    }
+
+    missing: list[str] = []
+    for module, package in required.items():
+        if importlib.util.find_spec(module) is None:
+            missing.append(package)
+
+    if not missing:
+        return
+
+    print(f"Installing missing dependencies: {', '.join(missing)}...", file=sys.stderr)
+
+    # Best-effort install: global -> user-site.
+    commands = [
+        [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", *missing],
+        [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--user", *missing],
+    ]
+    for cmd in commands:
+        try:
+            subprocess.check_call(cmd)
+            return
+        except subprocess.CalledProcessError:
+            continue
+
+    print(f"Warning: Failed to install dependencies: {missing}", file=sys.stderr)
+
+_ensure_dependencies()
+
+try:
+    from mcp.server import Server
+    from mcp.server.stdio import stdio_server
+    from mcp.types import Tool, TextContent
+except ModuleNotFoundError as e:
+    raise ModuleNotFoundError(
+        "Missing dependency 'mcp'. Install it with `pip install mcp` (or set up your environment so this MCP server can auto-install it)."
+    ) from e
+
+# Import skills matcher (local module; depends on pyyaml/regex per requirements.txt)
+try:
+    import skills_matcher
+    SKILLS_MATCHER = skills_matcher.SkillsMatcher()
+except ImportError:
+    skills_matcher = None  # type: ignore
+    SKILLS_MATCHER = None
+
+# =============================================================================
+# Observation Masking (Context Compression)
+# =============================================================================
+
+DEFAULT_MASK_CONFIG = {
+    "keep_recent_turns": 5,  # Reserved for future use (Cursor/IDE integration)
+    "head_chars": 500,
+    "tail_chars": 500,
+    "enabled_tools": ["Read", "Grep", "Shell", "Glob"],
+}
+
+
+def soft_trim(text: str, head_chars: int = 500, tail_chars: int = 500) -> str:
+    """Trim text while preserving head and tail."""
+    if not isinstance(text, str):
+        text = json.dumps(text, ensure_ascii=False, indent=2)
+
+    # Don't trim if under threshold (keep some buffer so small logs remain intact)
+    if len(text) <= (head_chars + tail_chars + 100):
+        return text
+
+    head = text[:head_chars]
+    tail = text[-tail_chars:] if tail_chars > 0 else ""
+    truncated = len(text) - len(head) - len(tail)
+
+    return f"{head}\n...[{truncated} chars truncated]...\n{tail}"
+
+
+def mask_tool_result(tool_name: str, result: Any, strategy: str = "soft_trim", *, head_chars: int | None = None, tail_chars: int | None = None) -> str:
+    """Mask a tool result according to strategy."""
+    tool_name = tool_name or "Unknown"
+    strategy = (strategy or "soft_trim").strip()
+
+    hc = int(head_chars) if head_chars is not None else int(DEFAULT_MASK_CONFIG["head_chars"])
+    tc = int(tail_chars) if tail_chars is not None else int(DEFAULT_MASK_CONFIG["tail_chars"])
+
+    # Normalize to string
+    if isinstance(result, str):
+        text = result
+    else:
+        try:
+            text = json.dumps(result, ensure_ascii=False, indent=2)
+        except Exception:
+            text = str(result)
+
+    if strategy == "soft_trim":
+        return soft_trim(text, head_chars=hc, tail_chars=tc)
+
+    # "summary" and "full_compress" are heuristic (no LLM in server).
+    if strategy == "summary":
+        # Smaller trims + basic stats
+        lines = text.count("\n") + 1 if text else 0
+        summary_head = soft_trim(text, head_chars=min(200, hc), tail_chars=min(200, tc))
+        return f"[summary:{tool_name}] {len(text)} chars, {lines} lines\n\n{summary_head}"
+
+    if strategy == "full_compress":
+        # Aggressive: keep only head and a short tail
+        return soft_trim(text, head_chars=min(300, hc), tail_chars=min(120, tc))
+
+    # Unknown strategy: return as-is
+    return text
+
+
+# =============================================================================
+# Long-term Memory (Personal Edition)
+# =============================================================================
+
+MEMORY_CATEGORY_TO_FILE = {
+    "decision": "decisions.jsonl",
+    "preference": "preferences.jsonl",
+    "pattern": "patterns.jsonl",
+}
+
+MEMORY_INDEX_FILE = "index.json"
+
+
+def _trellis_user_dir() -> Path:
+    """User-level Trellis directory (~/.trellis)."""
+    return Path.home() / ".trellis"
+
+
+def _memory_dir() -> Path:
+    return _trellis_user_dir() / "memory"
+
+
+def _default_memory_index() -> dict[str, Any]:
+    return {
+        "last_updated": None,
+        "counts": {"decisions": 0, "preferences": 0, "patterns": 0},
+        "keywords": {},
+    }
+
+
+def _ensure_memory_store() -> Path:
+    mem_dir = _memory_dir()
+    mem_dir.mkdir(parents=True, exist_ok=True)
+
+    # Ensure category files exist (append-only JSONL)
+    for filename in MEMORY_CATEGORY_TO_FILE.values():
+        path = mem_dir / filename
+        if not path.exists():
+            path.write_text("", encoding="utf-8")
+
+    # Ensure index exists
+    index_path = mem_dir / MEMORY_INDEX_FILE
+    if not index_path.exists():
+        index_path.write_text(json.dumps(_default_memory_index(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    return mem_dir
+
+
+def _tokenize(text: str) -> list[str]:
+    if not text:
+        return []
+    return [t.lower() for t in re.findall(r"[a-zA-Z0-9_]+", text)]
+
+
+def _parse_ts(ts: str | None) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        # Accept "Z" suffix by converting to "+00:00"
+        if ts.endswith("Z"):
+            ts = ts[:-1] + "+00:00"
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def _load_memory_index(mem_dir: Path) -> dict[str, Any]:
+    index_path = mem_dir / MEMORY_INDEX_FILE
+    try:
+        data = json.loads(index_path.read_text(encoding="utf-8") or "{}")
+        if not isinstance(data, dict):
+            return _default_memory_index()
+        # Fill missing keys
+        base = _default_memory_index()
+        base.update(data)
+        if not isinstance(base.get("counts"), dict):
+            base["counts"] = _default_memory_index()["counts"]
+        if not isinstance(base.get("keywords"), dict):
+            base["keywords"] = {}
+        return base
+    except Exception:
+        return _default_memory_index()
+
+
+def _save_memory_index(mem_dir: Path, index: dict[str, Any]) -> None:
+    index_path = mem_dir / MEMORY_INDEX_FILE
+    index_path.write_text(json.dumps(index, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _append_jsonl(path: Path, item: dict[str, Any]) -> None:
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+
+def _memory_plural_key(category: str) -> str:
+    return {
+        "decision": "decisions",
+        "preference": "preferences",
+        "pattern": "patterns",
+    }.get(category, "patterns")
+
+
+def _update_index_for_entry(index: dict[str, Any], entry: dict[str, Any], category: str) -> dict[str, Any]:
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    index["last_updated"] = now_iso
+
+    plural = _memory_plural_key(category)
+    counts = index.setdefault("counts", {})
+    counts[plural] = int(counts.get(plural, 0)) + 1
+
+    keywords = index.setdefault("keywords", {})
+    entry_id = entry.get("id")
+    # Index tags as keywords (cheap + predictable).
+    for tag in entry.get("tags") or []:
+        if not isinstance(tag, str) or not tag.strip():
+            continue
+        key = tag.strip().lower()
+        ids = keywords.setdefault(key, [])
+        if isinstance(ids, list) and entry_id and entry_id not in ids:
+            ids.append(entry_id)
+
+    return index
+
+
+def memory_save_entry(category: str, content: str, tags: list[str] | None = None, importance: int | None = None) -> dict[str, Any]:
+    mem_dir = _ensure_memory_store()
+
+    if category not in MEMORY_CATEGORY_TO_FILE:
+        raise ValueError(f"Invalid category: {category}")
+
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("content is required")
+
+    tags = tags or []
+    if not isinstance(tags, list):
+        tags = []
+    tags = [t for t in tags if isinstance(t, str) and t.strip()]
+
+    imp = int(importance) if importance is not None else 3
+    imp = max(1, min(5, imp))
+
+    entry = {
+        "id": uuid.uuid4().hex,
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "content": content.strip(),
+        "tags": tags,
+        "importance": imp,
+    }
+
+    jsonl_path = mem_dir / MEMORY_CATEGORY_TO_FILE[category]
+    _append_jsonl(jsonl_path, entry)
+
+    index = _load_memory_index(mem_dir)
+    index = _update_index_for_entry(index, entry, category)
+    _save_memory_index(mem_dir, index)
+
+    return entry
+
+
+def _load_memories(mem_dir: Path, category: str | None = None) -> list[dict[str, Any]]:
+    files: list[Path] = []
+    if category:
+        filename = MEMORY_CATEGORY_TO_FILE.get(category)
+        if not filename:
+            return []
+        files = [mem_dir / filename]
+    else:
+        files = [mem_dir / f for f in MEMORY_CATEGORY_TO_FILE.values()]
+
+    memories: list[dict[str, Any]] = []
+    for path in files:
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+                if isinstance(item, dict):
+                    memories.append(item)
+            except Exception:
+                continue
+    return memories
+
+
+def memory_search_entries(query: str, category: str | None = None, limit: int = 10) -> list[dict[str, Any]]:
+    if not isinstance(query, str) or not query.strip():
+        return []
+
+    mem_dir = _ensure_memory_store()
+    memories = _load_memories(mem_dir, category=category)
+    if not memories:
+        return []
+
+    keywords = _tokenize(query)
+    if not keywords:
+        return []
+
+    # Build document frequencies for query keywords
+    df: dict[str, int] = {kw: 0 for kw in set(keywords)}
+    per_doc_tokens: list[set[str]] = []
+
+    for m in memories:
+        combined = f"{m.get('content', '')}\n{' '.join(m.get('tags') or [])}"
+        toks = set(_tokenize(combined))
+        per_doc_tokens.append(toks)
+        for kw in df:
+            if kw in toks:
+                df[kw] += 1
+
+    n_docs = len(memories)
+    idf: dict[str, float] = {kw: (math.log((n_docs + 1) / (df[kw] + 1)) + 1.0) for kw in df}
+
+    now = datetime.now(timezone.utc)
+    results: list[dict[str, Any]] = []
+
+    for m, toks in zip(memories, per_doc_tokens, strict=False):
+        combined = f"{m.get('content', '')}\n{' '.join(m.get('tags') or [])}"
+        token_list = _tokenize(combined)
+        counts = Counter(token_list)
+
+        base = 0.0
+        for kw in df:
+            tf = float(counts.get(kw, 0))
+            if tf > 0:
+                base += tf * idf[kw]
+
+        if base <= 0:
+            continue
+
+        # Time decay: older memories rank lower (min 0.5x)
+        ts = _parse_ts(m.get("ts"))
+        age_days = (now - ts).days if ts else 9999
+        time_factor = max(0.5, 1.0 - (age_days / 60.0))
+
+        # Importance bonus
+        imp = m.get("importance", 3)
+        try:
+            imp_val = max(1, min(5, int(imp)))
+        except Exception:
+            imp_val = 3
+        importance_factor = imp_val / 5.0
+
+        score = base * time_factor * importance_factor
+        if score <= 0:
+            continue
+
+        item = dict(m)
+        item["score"] = round(score, 6)
+        results.append(item)
+
+    results.sort(key=lambda x: x.get("score", 0), reverse=True)
+    return results[: max(1, int(limit or 10))]
+
+
+# =============================================================================
+# Soul System (Personalization)
+# =============================================================================
+
+SOUL_FILENAME = "SOUL.md"
+IDENTITY_FILENAME = "IDENTITY.md"
+
+SOUL_TEMPLATE = """# AI Soul Configuration
+
+## Core Values
+
+Define what matters most in your development work:
+
+- Code Quality: {high/medium} - How much to prioritize clean code over speed
+- Innovation: {high/medium/low} - Willingness to suggest new approaches
+- Safety: {high/medium} - Caution level for destructive operations
+
+## Decision Principles
+
+When to ask vs proceed:
+
+- Ambiguous requirements: {ask/clarify/assume}
+- Multiple valid approaches: {ask/choose best/suggest options}
+- Destructive operations: {always ask/warn and proceed/just do it}
+
+## Expertise Focus
+
+Areas where deeper knowledge should be applied:
+
+- Languages: TypeScript, Python, Go
+- Frameworks: React, FastAPI, Node.js
+- Domains: Web development, DevOps, Data processing
+
+## Anti-Patterns to Avoid
+
+Things that should never happen:
+
+- Never commit secrets to git
+- Never run destructive operations without confirmation
+- Never delete user data without an explicit request
+"""
+
+IDENTITY_TEMPLATE = """# AI Identity
+
+## Communication Style
+
+- Language: English (use Chinese for Chinese input)
+- Tone: Professional but friendly
+- Verbosity: Concise (expand only when asked)
+
+## Response Preferences
+
+- Code blocks: Prefer fenced code blocks
+- Explanations: Before code, not after
+- Examples: Provide when introducing new concepts
+
+## Formatting
+
+- Use markdown headers for structure
+- Use bullet points for lists
+- Use tables for comparisons
+- Use code fences for all code
+"""
+
+
+def _ensure_soul_identity_templates() -> tuple[Path, Path]:
+    base = _trellis_user_dir()
+    base.mkdir(parents=True, exist_ok=True)
+
+    soul_path = base / SOUL_FILENAME
+    identity_path = base / IDENTITY_FILENAME
+
+    if not soul_path.exists():
+        soul_path.write_text(SOUL_TEMPLATE.strip() + "\n", encoding="utf-8")
+    if not identity_path.exists():
+        identity_path.write_text(IDENTITY_TEMPLATE.strip() + "\n", encoding="utf-8")
+
+    return soul_path, identity_path
+
+
+def _load_soul_identity_context() -> str | None:
+    soul_path, identity_path = _ensure_soul_identity_templates()
+    parts: list[str] = []
+
+    try:
+        if soul_path.exists():
+            soul_text = soul_path.read_text(encoding="utf-8")
+            parts.append(
+                f"=== {soul_path} (Soul Configuration) ===\n"
+                f"{soft_trim(soul_text, head_chars=800, tail_chars=400)}"
+            )
+    except Exception:
+        pass
+
+    try:
+        if identity_path.exists():
+            identity_text = identity_path.read_text(encoding="utf-8")
+            parts.append(
+                f"=== {identity_path} (Identity Configuration) ===\n"
+                f"{soft_trim(identity_text, head_chars=800, tail_chars=400)}"
+            )
+    except Exception:
+        pass
+
+    return "\n\n".join(parts) if parts else None
 
 # =============================================================================
 # Path Constants
@@ -117,49 +621,80 @@ def get_current_task_path(root: str) -> str | None:
         return None
 
 
-def get_developer_name(root: str) -> str | None:
-    """Read developer name from .trellis/.developer"""
-    developer_file = os.path.join(root, DIR_WORKFLOW, FILE_DEVELOPER)
-    if not os.path.exists(developer_file):
+def get_developer_name(root: str) -> str:
+    """
+    Personal Edition: single-user mode.
+
+    Always use the default workspace (`.trellis/workspace/default/`).
+    This intentionally ignores `.trellis/.developer` while keeping existing
+    task paths (from `.trellis/.current-task`) working for backward compatibility.
+    """
+    return "default"
+
+
+def _safe_resolve_under_base(base_path: str, rel_path: str) -> Path | None:
+    """
+    Resolve a relative path under base_path, preventing path traversal.
+
+    Returns None if rel_path escapes base_path (or is invalid).
+    """
+    if not isinstance(rel_path, str) or not rel_path.strip():
         return None
+
+    base = Path(base_path).resolve()
     try:
-        with open(developer_file, "r", encoding="utf-8") as f:
-            return f.read().strip()
+        candidate = (base / rel_path).resolve()
     except Exception:
         return None
+
+    try:
+        candidate.relative_to(base)
+    except Exception:
+        return None
+
+    return candidate
 
 
 def read_file_content(base_path: str, file_path: str) -> str | None:
     """Read file content, return None if file doesn't exist"""
-    full_path = os.path.join(base_path, file_path)
-    if os.path.exists(full_path) and os.path.isfile(full_path):
-        try:
-            with open(full_path, "r", encoding="utf-8") as f:
-                return f.read()
-        except Exception:
-            return None
-    return None
+    full_path = _safe_resolve_under_base(base_path, file_path)
+    if full_path is None or not full_path.exists() or not full_path.is_file():
+        return None
+
+    try:
+        content = full_path.read_text(encoding="utf-8")
+        # Automatically trim very large injected context to save tokens.
+        if "Read" in DEFAULT_MASK_CONFIG.get("enabled_tools", []):
+            return soft_trim(
+                content,
+                head_chars=int(DEFAULT_MASK_CONFIG["head_chars"]),
+                tail_chars=int(DEFAULT_MASK_CONFIG["tail_chars"]),
+            )
+        return content
+    except Exception:
+        return None
 
 
 def read_directory_contents(base_path: str, dir_path: str, max_files: int = 20) -> list[tuple[str, str]]:
     """Read all .md files in a directory"""
-    full_path = os.path.join(base_path, dir_path)
-    if not os.path.exists(full_path) or not os.path.isdir(full_path):
+    full_dir = _safe_resolve_under_base(base_path, dir_path)
+    if full_dir is None or not full_dir.exists() or not full_dir.is_dir():
         return []
-    
-    results = []
+
+    results: list[tuple[str, str]] = []
     try:
-        md_files = sorted([
-            f for f in os.listdir(full_path)
-            if f.endswith(".md") and os.path.isfile(os.path.join(full_path, f))
-        ])
-        for filename in md_files[:max_files]:
-            file_full_path = os.path.join(full_path, filename)
-            relative_path = os.path.join(dir_path, filename)
+        md_files = sorted([p for p in full_dir.iterdir() if p.is_file() and p.name.endswith(".md")], key=lambda p: p.name)
+        for p in md_files[:max_files]:
+            relative_path = (Path(dir_path) / p.name).as_posix()
             try:
-                with open(file_full_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                    results.append((relative_path, content))
+                content = p.read_text(encoding="utf-8")
+                if "Read" in DEFAULT_MASK_CONFIG.get("enabled_tools", []):
+                    content = soft_trim(
+                        content,
+                        head_chars=int(DEFAULT_MASK_CONFIG["head_chars"]),
+                        tail_chars=int(DEFAULT_MASK_CONFIG["tail_chars"]),
+                    )
+                results.append((relative_path, content))
             except Exception:
                 continue
     except Exception:
@@ -169,8 +704,8 @@ def read_directory_contents(base_path: str, dir_path: str, max_files: int = 20) 
 
 def read_jsonl_entries(base_path: str, jsonl_path: str) -> list[tuple[str, str]]:
     """Read all file/directory contents referenced in jsonl file"""
-    full_path = os.path.join(base_path, jsonl_path)
-    if not os.path.exists(full_path):
+    full_path = _safe_resolve_under_base(base_path, jsonl_path)
+    if full_path is None or not full_path.exists() or not full_path.is_file():
         return []
     
     results = []
@@ -618,6 +1153,76 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
+            name="mask_tool_results",
+            description="Compress/trim large tool results to save context tokens (Observation Masking).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "tool_name": {"type": "string", "description": "Name of the tool whose result to mask"},
+                    "result": {"description": "Original tool result (string or JSON-serializable)"},
+                    "strategy": {
+                        "type": "string",
+                        "description": "Masking strategy",
+                        "enum": ["soft_trim", "full_compress", "summary"],
+                        "default": "soft_trim",
+                    },
+                    "head_chars": {"type": "integer", "description": "Override head chars (optional)"},
+                    "tail_chars": {"type": "integer", "description": "Override tail chars (optional)"},
+                },
+                "required": ["tool_name", "result"],
+            },
+        ),
+        Tool(
+            name="memory_save",
+            description="Save important information to long-term memory (Personal Edition).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "enum": ["decision", "preference", "pattern"],
+                        "description": "Memory category",
+                    },
+                    "content": {"type": "string", "description": "Memory content"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags for search (optional)"},
+                    "importance": {"type": "integer", "minimum": 1, "maximum": 5, "description": "Importance 1-5 (optional)"},
+                },
+                "required": ["category", "content"],
+            },
+        ),
+        Tool(
+            name="memory_search",
+            description="Search long-term memory with keyword matching and time decay (Personal Edition).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "category": {"type": "string", "enum": ["decision", "preference", "pattern"], "description": "Optional category filter"},
+                    "limit": {"type": "integer", "default": 10, "description": "Max results"},
+                },
+                "required": ["query"],
+            },
+        ),
+        Tool(
+            name="memory_flush",
+            description="Manually flush a session summary into long-term memory (Personal Edition).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "enum": ["decision", "preference", "pattern"],
+                        "default": "pattern",
+                        "description": "Which memory category to store the flush under",
+                    },
+                    "content": {"type": "string", "description": "Summary / content to save"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags (optional)"},
+                    "importance": {"type": "integer", "minimum": 1, "maximum": 5, "description": "Importance 1-5 (optional)"},
+                },
+                "required": ["content"],
+            },
+        ),
+        Tool(
             name="get_current_task",
             description="Get current task information including task.json content and task directory path",
             inputSchema={
@@ -737,6 +1342,34 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["spec_type"]
             }
+        ),
+        Tool(
+            name="match_skills",
+            description="Find skills that match a prompt and optional file context. Skills are defined in SKILL.md files with triggers (keywords, patterns, files). Returns matched skills sorted by relevance score.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "User prompt to match against skill triggers (keywords, regex patterns)"
+                    },
+                    "files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional file paths for context-based matching (glob patterns in skill triggers)"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "default": 5,
+                        "description": "Maximum number of matching skills to return (1-50)"
+                    },
+                    "project_root": {
+                        "type": "string",
+                        "description": "Optional project root for project-level skills (.trellis/skills/)"
+                    }
+                },
+                "required": ["prompt"]
+            }
         )
     ]
 
@@ -747,7 +1380,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     
     project_root = arguments.get("project_root") or find_trellis_root()
     
-    if not project_root:
+    # match_skills can run without a Trellis project (uses global skills dirs)
+    if not project_root and name != "match_skills":
         return [TextContent(
             type="text",
             text=f"Error: Could not find .trellis directory.\n\n"
@@ -797,10 +1431,65 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         
         if not context:
             context = "(No specific context files found. Check task directory for *.jsonl files.)"
+
+        # Soul / Identity injection (Personal Edition)
+        soul_ctx = _load_soul_identity_context()
+        if soul_ctx:
+            context = f"{soul_ctx}\n\n{context}"
         
         full_prompt = build_agent_prompt(agent_type, context)
         
         return [TextContent(type="text", text=full_prompt)]
+
+    elif name == "mask_tool_results":
+        tool_name = arguments.get("tool_name") or "Unknown"
+        result = arguments.get("result")
+        strategy = arguments.get("strategy", "soft_trim")
+        head_chars = arguments.get("head_chars")
+        tail_chars = arguments.get("tail_chars")
+
+        masked = mask_tool_result(tool_name, result, strategy=strategy, head_chars=head_chars, tail_chars=tail_chars)
+        return [TextContent(type="text", text=masked)]
+
+    elif name == "memory_save":
+        try:
+            category = arguments.get("category")
+            content = arguments.get("content")
+            tags = arguments.get("tags")
+            importance = arguments.get("importance")
+
+            entry = memory_save_entry(category, content, tags=tags, importance=importance)
+            return [TextContent(type="text", text=json.dumps(entry, indent=2, ensure_ascii=False))]
+        except Exception as e:
+            return [TextContent(type="text", text=f"Error saving memory: {e}")]
+
+    elif name == "memory_search":
+        try:
+            query = arguments.get("query", "")
+            category = arguments.get("category")
+            limit = arguments.get("limit", 10)
+            results = memory_search_entries(query, category=category, limit=limit)
+            return [TextContent(type="text", text=json.dumps(results, indent=2, ensure_ascii=False))]
+        except Exception as e:
+            return [TextContent(type="text", text=f"Error searching memory: {e}")]
+
+    elif name == "memory_flush":
+        try:
+            category = arguments.get("category", "pattern")
+            content = arguments.get("content") or arguments.get("summary") or ""
+            tags = arguments.get("tags") or []
+            importance = arguments.get("importance")
+
+            if not isinstance(tags, list):
+                tags = []
+            tags = [t for t in tags if isinstance(t, str) and t.strip()]
+            if "session-summary" not in [t.lower() for t in tags]:
+                tags.append("session-summary")
+
+            entry = memory_save_entry(category, content, tags=tags, importance=importance)
+            return [TextContent(type="text", text=json.dumps(entry, indent=2, ensure_ascii=False))]
+        except Exception as e:
+            return [TextContent(type="text", text=f"Error flushing memory: {e}")]
     
     elif name == "get_current_task":
         task_dir = get_current_task_path(project_root)
@@ -983,6 +1672,50 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         if results:
             return [TextContent(type="text", text="\n\n".join(results))]
         return [TextContent(type="text", text=f"No spec index found for: {spec_type}")]
+
+    elif name == "match_skills":
+        # Check if skills_matcher is available
+        if SKILLS_MATCHER is None:
+            return [TextContent(
+                type="text",
+                text="Error: Skills matching is not available. skills_matcher.py may be missing.\n"
+                     "Please ensure the trellis-context server includes skills_matcher.py and restart Cursor."
+            )]
+
+        prompt = arguments.get("prompt")
+        if prompt is None:
+            return [TextContent(type="text", text="Error: prompt is required")]
+
+        files = arguments.get("files", [])
+        max_results = arguments.get("max_results", 5)
+
+        # Validate files parameter
+        if not isinstance(files, list):
+            files = []
+        files = [str(f) for f in files if f is not None]
+
+        # Validate max_results
+        try:
+            max_results = int(max_results)
+        except (TypeError, ValueError):
+            max_results = 5
+        max_results = max(1, min(50, max_results))
+
+        # Perform matching
+        matches = SKILLS_MATCHER.match(str(prompt), files, project_root)
+
+        # Format results
+        results: list[dict[str, Any]] = []
+        for m in matches[:max_results]:
+            results.append({
+                "name": m.skill.name,
+                "description": m.skill.description,
+                "score": m.score,
+                "matched_by": m.matched_by,
+                "path": m.skill.path,
+            })
+
+        return [TextContent(type="text", text=json.dumps(results, indent=2, ensure_ascii=False))]
     
     return [TextContent(type="text", text=f"Unknown tool: {name}")]
 

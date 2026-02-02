@@ -11,6 +11,7 @@ Usage:
   python task.py start <dir>
   python task.py finish
   python task.py list
+  python task.py archive <name>
 """
 
 import argparse
@@ -410,6 +411,77 @@ def cmd_list(args, repo_root: Path):
     print(f"\nTotal: {count} task(s)")
 
 
+def find_task_by_name(task_name: str, tasks_dir: Path) -> Path | None:
+    """Find task directory by name or partial name"""
+    # First try exact match
+    if (tasks_dir / task_name).exists():
+        return tasks_dir / task_name
+    
+    # Try partial match
+    for d in tasks_dir.iterdir():
+        if d.is_dir() and d.name != "archive":
+            if task_name in d.name or d.name.endswith(f"-{task_name}"):
+                return d
+    
+    return None
+
+
+def cmd_archive(args, repo_root: Path):
+    """Archive completed task"""
+    task_name = args.name
+    tasks_dir = get_tasks_dir(repo_root)
+    
+    # Find task directory
+    task_dir = find_task_by_name(task_name, tasks_dir)
+    
+    if not task_dir or not task_dir.exists():
+        print(f"Error: Task not found: {task_name}", file=sys.stderr)
+        print("Active tasks:", file=sys.stderr)
+        for d in sorted(tasks_dir.iterdir()):
+            if d.is_dir() and d.name != "archive":
+                print(f"  - {d.name}/", file=sys.stderr)
+        sys.exit(1)
+    
+    dir_name = task_dir.name
+    task_json_path = task_dir / FILE_TASK_JSON
+    
+    # Update status before archiving
+    today = datetime.now().strftime("%Y-%m-%d")
+    if task_json_path.exists():
+        try:
+            data = json.loads(task_json_path.read_text(encoding="utf-8"))
+            data["status"] = "completed"
+            data["completedAt"] = today
+            task_json_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        except:
+            pass
+    
+    # Clear if current task
+    current = get_current_task(repo_root)
+    if current and dir_name in current:
+        clear_current_task(repo_root)
+    
+    # Create archive directory
+    year_month = datetime.now().strftime("%Y-%m")
+    archive_dir = tasks_dir / "archive" / year_month
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Move task to archive
+    dest = archive_dir / dir_name
+    
+    # If destination exists, remove it first
+    if dest.exists():
+        import shutil
+        shutil.rmtree(dest)
+    
+    # Move task directory
+    import shutil
+    shutil.move(str(task_dir), str(dest))
+    
+    print(f"Archived: {dir_name} -> archive/{year_month}/", file=sys.stderr)
+    print(f"{DIR_WORKFLOW}/{DIR_TASKS}/archive/{year_month}/{dir_name}")
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -455,6 +527,10 @@ def main():
     # list
     subparsers.add_parser("list", help="List tasks")
     
+    # archive
+    p_archive = subparsers.add_parser("archive", help="Archive completed task")
+    p_archive.add_argument("name", help="Task name or slug")
+    
     args = parser.parse_args()
     
     if args.command == "create":
@@ -473,6 +549,8 @@ def main():
         cmd_finish(args, repo_root)
     elif args.command == "list":
         cmd_list(args, repo_root)
+    elif args.command == "archive":
+        cmd_archive(args, repo_root)
     else:
         parser.print_help()
 
